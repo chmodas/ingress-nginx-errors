@@ -1,0 +1,13 @@
+[package]
+name = "ingress-nginx-errors"
+version = "0.1.0"
+edition = "2021"
+
+
+[dependencies]
+hyper = { version = "0.14", default-features = false, features = ["server", "http1", "http2", "runtime"] }
+tokio = { version = "1", default-features = false, features = ["macros", "rt-multi-thread"] }
+futures-util = { version = "0.3", default-features = false }
+futures-core = { version = "0.3", default-features = false }
+mime = "0.3.16"
+clap = { version = "2.33.3", default-features = false }
