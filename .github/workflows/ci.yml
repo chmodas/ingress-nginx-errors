@@ -25,3 +25,5 @@ jobs:
             ${{ runner.os }}-cargo-
       - name: Build and test
         run: cargo test
+      - name: Package in Docker
+        run: docker build -t ghcr.io/chmodas/ingress-nginx-errors:latest .
