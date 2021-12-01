@@ -1,7 +1,7 @@
 use std::fs::OpenOptions;
 use std::io::{BufReader, Read};
 use std::net::SocketAddr;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::process::exit;
 use std::str::FromStr;
 use std::task::{Context, Poll};
@@ -27,17 +27,17 @@ const DEFAULT_FORMAT: &str = "html";
 const DEFAULT_CODE: u32 = 404;
 
 #[derive(Debug)]
-pub struct Svc<'a> {
-    base: &'a Path,
+pub struct Svc {
+    templates_dir: PathBuf,
 }
 
-impl<'a> Svc<'a> {
-    pub fn new(base: &'a Path) -> Self {
-        Self { base }
+impl Svc {
+    pub fn new(templates_dir: PathBuf) -> Self {
+        Self { templates_dir }
     }
 }
 
-impl<'a> Service<Request<Body>> for Svc<'a> {
+impl Service<Request<Body>> for Svc {
     type Response = Response<Body>;
     type Error = hyper::Error;
     type Future = future::Ready<Result<Self::Response, Self::Error>>;
@@ -51,7 +51,6 @@ impl<'a> Service<Request<Body>> for Svc<'a> {
 
         let uri = req.uri();
         if uri.path() != ROOT {
-            println!("URI path {}", uri.path());
             let body = Body::from(Vec::new());
             let rsp = rsp.status(404).body(body).unwrap();
             return future::ok(rsp);
@@ -90,9 +89,8 @@ impl<'a> Service<Request<Body>> for Svc<'a> {
             })
             .unwrap_or(format!("{}.{}", code, DEFAULT_FORMAT));
 
-        let mut path = PathBuf::from(&self.base);
-        path.push(response);
-        return future::ok(match OpenOptions::new().read(true).open(path) {
+        self.templates_dir.push(response);
+        return future::ok(match OpenOptions::new().read(true).open(&self.templates_dir) {
             Ok(file) => {
                 let mut reader = BufReader::new(file);
                 let mut buffer = Vec::new();
@@ -102,7 +100,7 @@ impl<'a> Service<Request<Body>> for Svc<'a> {
                 rsp.status(200).body(body).unwrap()
             }
             Err(error) => {
-                eprintln!("Unexpected error reading the response file: {}", error);
+                eprintln!("Unexpected error reading the template file {:?}: {}", &self.templates_dir, error);
                 let body = Body::from(Vec::new());
                 rsp.status(404).body(body).unwrap()
             }
@@ -110,18 +108,18 @@ impl<'a> Service<Request<Body>> for Svc<'a> {
     }
 }
 
-pub struct MakeSvc<'a> {
-    base: &'a Path,
+pub struct MakeSvc {
+    templates_dir: PathBuf,
 }
 
-impl<'a> MakeSvc<'a> {
-    pub fn new(base: &'a Path) -> Self {
-        Self { base }
+impl MakeSvc {
+    pub fn new(templates_dir: PathBuf) -> Self {
+        Self { templates_dir }
     }
 }
 
-impl<'a, T> Service<T> for MakeSvc<'a> {
-    type Response = Svc<'a>;
+impl<T> Service<T> for MakeSvc {
+    type Response = Svc;
     type Error = std::io::Error;
     type Future = future::Ready<Result<Self::Response, Self::Error>>;
 
@@ -130,13 +128,13 @@ impl<'a, T> Service<T> for MakeSvc<'a> {
     }
 
     fn call(&mut self, _: T) -> Self::Future {
-        future::ok(Svc::new(self.base))
+        future::ok(Svc::new(self.templates_dir.clone()))
     }
 }
 
 
 /// Parse the CLI arguments.
-fn command_line_interface() -> ArgMatches<'static> {
+fn command_line_interface<'a>() -> ArgMatches<'a> {
     App::new("ingress-nginx-errors")
         .version("0.1")
         .arg(
@@ -149,11 +147,11 @@ fn command_line_interface() -> ArgMatches<'static> {
                 .takes_value(true)
         )
         .arg(
-            Arg::with_name("responses-dir")
-                .help("The path to the directory containing the response files.")
+            Arg::with_name("templates-dir")
+                .help("The path to the directory containing the template files.")
                 .short("p")
-                .long("responses-dir")
-                .value_name("responses-dir")
+                .long("templates-dir")
+                .value_name("templates-dir")
                 .takes_value(true)
         )
         .get_matches()
@@ -166,21 +164,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .value_of("listen-address")
         .expect("The listen-address must be provided")
         .parse::<SocketAddr>()?;
-    let path = matches
-        .value_of("responses-dir")
-        .map(|it| Path::new(it))
+    let templates_dir = matches
+        .value_of("templates-dir")
+        .map(PathBuf::from)
         .expect("The path to the response files must be provided");
 
-    if !path.exists() && path.is_dir() {
-        eprintln!("The path to the response files does not exist");
+    if !templates_dir.exists() {
+        eprintln!("The templates path {:?} does not exist", templates_dir);
         exit(1)
-    } else if !path.is_dir() {
-        eprintln!("The specified response files path does not point to a directory");
+    } else if !templates_dir.is_dir() {
+        eprintln!("The templates path {:?} is not a directory", templates_dir);
         exit(1)
     }
 
-
-    let server = Server::bind(&addr).serve(MakeSvc::new(Path::new("./files")));
+    let server = Server::bind(&addr).serve(MakeSvc::new(templates_dir));
 
     println!("Listening on http://{}", addr);
 
@@ -209,8 +206,6 @@ mod tests {
 
     #[tokio::test]
     async fn formatted_as_json() -> Result<(), Box<dyn Error>> {
-        let mut svc = Svc::new(Path::new("./files"));
-
         let errs = vec![
             ("404", "The page you're looking for could not be found"),
             ("500", "Internal server error"),
@@ -218,10 +213,10 @@ mod tests {
         for (code, message) in errs {
             let request = req("/", vec![("X-Code", code), ("X-Format", "application/json")]);
 
-            let mut outcome = svc.call(request).await?;
-            assert_eq!(outcome.status(), 200);
+            let mut response = Svc::new(PathBuf::from("./files")).call(request).await?;
+            assert_eq!(response.status(), 200);
 
-            let body = body::to_bytes(outcome.body_mut()).await?;
+            let body = body::to_bytes(response.body_mut()).await?;
             assert_eq!(body, Bytes::from(format!(r#"{{"message":"{}"}}"#, message)));
         }
 
@@ -230,8 +225,6 @@ mod tests {
 
     #[tokio::test]
     async fn formatted_as_html() -> Result<(), Box<dyn Error>> {
-        let mut svc = Svc::new(Path::new("./files"));
-
         let errs = vec![
             ("404", "The page you're looking for could not be found"),
             ("500", "Internal server error"),
@@ -239,10 +232,10 @@ mod tests {
         for (code, message) in errs {
             let request = req("/", vec![("X-Code", code), ("X-Format", "text/html")]);
 
-            let mut outcome = svc.call(request).await?;
-            assert_eq!(outcome.status(), 200);
+            let mut response = Svc::new(PathBuf::from("./files")).call(request).await?;
+            assert_eq!(response.status(), 200);
 
-            let body = body::to_bytes(outcome.body_mut()).await?;
+            let body = body::to_bytes(response.body_mut()).await?;
             assert_eq!(body, Bytes::from(format!("<span>{}</span>", message)));
         }
 
@@ -251,14 +244,12 @@ mod tests {
 
     #[tokio::test]
     async fn html_by_default() -> Result<(), Box<dyn Error>> {
-        let mut svc = Svc::new(Path::new("files"));
-
         let request = req("/", vec![("X-Code", "500")]);
 
-        let mut outcome = svc.call(request).await?;
-        assert_eq!(outcome.status(), 200);
+        let mut response = Svc::new(PathBuf::from("files")).call(request).await?;
+        assert_eq!(response.status(), 200);
 
-        let body = body::to_bytes(outcome.body_mut()).await?;
+        let body = body::to_bytes(response.body_mut()).await?;
         assert_eq!(body, Bytes::from("<span>Internal server error</span>"));
 
         Ok(())
@@ -266,14 +257,12 @@ mod tests {
 
     #[tokio::test]
     async fn picks_404_for_erroneous_code() -> Result<(), Box<dyn Error>> {
-        let mut svc = Svc::new(Path::new("files"));
-
         let request = req("/", vec![("X-Code", "x500")]);
 
-        let mut outcome = svc.call(request).await?;
-        assert_eq!(outcome.status(), 200);
+        let mut response = Svc::new(PathBuf::from("files")).call(request).await?;
+        assert_eq!(response.status(), 200);
 
-        let body = body::to_bytes(outcome.body_mut()).await?;
+        let body = body::to_bytes(response.body_mut()).await?;
         assert_eq!(body, Bytes::from("<span>The page you're looking for could not be found</span>"));
 
         Ok(())
@@ -281,14 +270,12 @@ mod tests {
 
     #[tokio::test]
     async fn empty_404_for_codes_without_files() -> Result<(), Box<dyn Error>> {
-        let mut svc = Svc::new(Path::new("files"));
-
         let request = req("/", vec![("X-Code", "403")]);
 
-        let mut outcome = svc.call(request).await?;
-        assert_eq!(outcome.status(), 404);
+        let mut response = Svc::new(PathBuf::from("files")).call(request).await?;
+        assert_eq!(response.status(), 404);
 
-        let body = body::to_bytes(outcome.body_mut()).await?;
+        let body = body::to_bytes(response.body_mut()).await?;
         assert!(body.is_empty());
 
         Ok(())
@@ -296,14 +283,12 @@ mod tests {
 
     #[tokio::test]
     async fn empty_404_for_requests_to_pages_other_than_root() -> Result<(), Box<dyn Error>> {
-        let mut svc = Svc::new(Path::new("files"));
-
         let request = req("/boo", vec![("X-Code", "403")]);
 
-        let mut outcome = svc.call(request).await?;
-        assert_eq!(outcome.status(), 404);
+        let mut response = Svc::new(PathBuf::from("files")).call(request).await?;
+        assert_eq!(response.status(), 404);
 
-        let body = body::to_bytes(outcome.body_mut()).await?;
+        let body = body::to_bytes(response.body_mut()).await?;
         assert!(body.is_empty());
 
         Ok(())
