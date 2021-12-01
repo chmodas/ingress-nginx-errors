@@ -25,5 +25,13 @@ jobs:
             ${{ runner.os }}-cargo-
       - name: Build and test
         run: cargo test
-      - name: Package in Docker
-        run: docker build -t ghcr.io/chmodas/ingress-nginx-errors:latest .
+      - name: Login to GitHub Package Registry
+        uses: docker/login-action@v1
+        with:
+          registry: ghcr.io
+          username: ${{ github.repository_owner }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Package in Docker and publish to GHCR
+        run: |
+          docker build -t ghcr.io/chmodas/ingress-nginx-errors:latest .
+          docker push ghcr.io/chmodas/ingress-nginx-errors:latest
